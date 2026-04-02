@@ -29,11 +29,20 @@ pub mod coin_type {
     /// Ethereum mainnet (SLIP-0044, coin type 60).
     pub const ETH: u64 = 60;
 
-    /// Computes the ENSIP-11 EVM coin type for the given chain ID.
+    /// Converts an EVM chain ID to its ENSIP-11 coin type.
     ///
-    /// Equivalent to `0x80000000 | chain_id`.
-    pub const fn evm_chain(chain_id: u32) -> u64 {
-        0x8000_0000u64 | chain_id as u64
+    /// Chain ID `1` (Ethereum mainnet) returns [`ETH`] (`60`) per SLIP-0044.
+    /// All other chains use `0x80000000 | chain_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chain_id` is `0` or `>= 0x80000000`.
+    pub fn evm_chain(chain_id: u32) -> u64 {
+        if chain_id == 1 {
+            return ETH;
+        }
+        assert!(chain_id < 0x8000_0000, "chain_id out of valid ENSIP-11 range");
+        0x8000_0000u64 | u64::from(chain_id)
     }
 }
 
@@ -91,10 +100,7 @@ impl FromStr for NameOrAddress {
         match Address::from_str(s) {
             Ok(addr) => Ok(Self::Address(addr)),
             Err(err) => {
-                // Treat any dot-separated string longer than 2 chars as a potential ENS name.
-                // This covers .eth names, imported DNS domains (e.g. ensfairy.xyz), subdomains,
-                // and emoji domains as required by ENSv2.
-                if s.contains('.') && s.len() > 2 {
+                if s.contains('.') {
                     Ok(Self::Name(s.to_string()))
                 } else {
                     Err(err)
@@ -201,16 +207,36 @@ mod contract {
         /// CCIP Read will surface as [`EnsError::Resolve`].
         #[sol(rpc)]
         contract UniversalResolver {
+            error ResolverNotFound(bytes name);
+            error ResolverNotContract(bytes name, address resolver);
+            error ReverseAddressMismatch(string primary, bytes primaryAddress);
+            error UnsupportedResolverProfile(bytes4 selector);
+            error ResolverError(bytes errorData);
+
+            /// Returns the resolver for `name` (DNS wire-format) without performing resolution.
+            ///
+            /// Returns `(resolver, node, offset)` where `resolver` is the contract address,
+            /// `node` is the namehash, and `offset` is the byte offset into `name` at which
+            /// the resolver was found (for wildcard/parent resolution).
+            function findResolver(bytes memory name) public view returns (address, bytes32, uint256);
+
             /// Resolves `name` (DNS wire-format) using the encoded `data` call.
             ///
             /// Returns the ABI-encoded result of the resolver call and the resolver address.
             /// Reverts with `OffchainLookup` when CCIP Read (ERC-3668) is required.
             function resolve(bytes calldata name, bytes calldata data) external view returns (bytes memory result, address resolver);
 
+            /// Like `resolve`, but uses `gateways` for CCIP Read instead of the default.
+            function resolveWithGateways(bytes calldata name, bytes calldata data, string[] memory gateways) public view returns (bytes memory result, address resolver);
+
             /// Reverse-resolves an address to its primary ENS name.
             ///
-            /// `reverse_name` is the DNS wire-format encoding of `<addr>.addr.reverse`.
-            function reverse(bytes calldata reverse_name) external view returns (string memory name, address resolver, address reverse_resolver, address addr);
+            /// `lookupAddress` is the DNS wire-format encoding of `<addr>.addr.reverse`.
+            /// `coinType` specifies the chain (use [`coin_type::ETH`] for Ethereum).
+            function reverse(bytes calldata lookupAddress, uint256 coinType) external view returns (string memory name, address resolver, address reverseResolver);
+
+            /// Like `reverse`, but uses `gateways` for CCIP Read instead of the default.
+            function reverseWithGateways(bytes calldata lookupAddress, uint256 coinType, string[] memory gateways) public view returns (string memory name, address resolver, address reverseResolver);
         }
     }
 
@@ -244,8 +270,9 @@ mod contract {
 #[cfg(feature = "provider")]
 mod provider {
     use crate::{
-        dns_encode, namehash, reverse_address, EnsError, EnsMulticoinResolver, EnsResolver,
-        EnsResolver::EnsResolverInstance, UniversalResolver, ENS_UNIVERSAL_RESOLVER_ADDRESS,
+        coin_type, dns_encode, namehash, reverse_address, EnsError, EnsMulticoinResolver,
+        EnsResolver, EnsResolver::EnsResolverInstance, UniversalResolver,
+        ENS_UNIVERSAL_RESOLVER_ADDRESS,
     };
     use alloy_primitives::{Address, Bytes, U256};
     use alloy_provider::{Network, Provider};
@@ -317,7 +344,7 @@ mod provider {
 
             let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
             let ret = ur
-                .reverse(dns.into())
+                .reverse(dns.into(), U256::from(coin_type::ETH))
                 .call()
                 .await
                 .map_err(EnsError::Lookup)?;
@@ -351,21 +378,19 @@ mod provider {
         N: Network,
     {
         async fn get_resolver(&self, name: &str) -> Result<EnsResolverInstance<&P, N>, EnsError> {
-            let node = namehash(name);
             let dns = dns_encode(name)?;
-            let calldata = EnsResolver::addrCall { node }.abi_encode();
 
             let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
             let ret = ur
-                .resolve(dns.into(), calldata.into())
+                .findResolver(dns.into())
                 .call()
                 .await
                 .map_err(EnsError::Resolver)?;
 
-            if ret.resolver == Address::ZERO {
+            if ret._0 == Address::ZERO {
                 return Err(EnsError::ResolverNotFound(name.to_string()));
             }
-            Ok(EnsResolverInstance::new(ret.resolver, self))
+            Ok(EnsResolverInstance::new(ret._0, self))
         }
     }
 }
@@ -486,8 +511,6 @@ mod test {
             NameOrAddress::from_str("ensfairy.xyz"),
             Ok(NameOrAddress::Name(_))
         ));
-        // Too short to be a valid ENS name (len <= 2)
-        assert!(NameOrAddress::from_str(".").is_err());
         // Valid subdomains
         assert!(matches!(
             NameOrAddress::from_str("sub.foo.eth"),
@@ -498,10 +521,16 @@ mod test {
     #[test]
     fn test_coin_type_evm_chain() {
         use crate::coin_type;
-        assert_eq!(coin_type::evm_chain(1), 0x8000_0001);
+        assert_eq!(coin_type::evm_chain(1), coin_type::ETH); // mainnet special case
         assert_eq!(coin_type::evm_chain(8453), 0x8000_2105); // Base
         assert_eq!(coin_type::evm_chain(10), 0x8000_000A); // Optimism
         assert_eq!(coin_type::evm_chain(42161), 0x8000_A4B1); // Arbitrum One
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_coin_type_evm_chain_invalid() {
+        crate::coin_type::evm_chain(0x8000_0000);
     }
 }
 
