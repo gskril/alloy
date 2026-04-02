@@ -11,9 +11,6 @@
 use alloy_primitives::{address, Address, Keccak256, B256};
 use std::{borrow::Cow, str::FromStr};
 
-/// ENS registry address (`0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`).
-pub const ENS_ADDRESS: Address = address!("0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
-
 /// ENS Universal Resolver address (`0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`).
 ///
 /// The primary entry-point for ENSv2 name resolution. This upgradable proxy,
@@ -22,8 +19,6 @@ pub const ENS_ADDRESS: Address = address!("0x00000000000C2E074eC69A0dFb2997BA6C7
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: Address =
     address!("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe");
 
-/// ENS const for registrar domain.
-pub const ENS_REVERSE_REGISTRAR_DOMAIN: &str = "addr.reverse";
 
 /// Coin types for ENS multichain address resolution.
 ///
@@ -170,16 +165,6 @@ mod contract {
 
     // ENS Registry, Resolver, and Universal Resolver contracts.
     sol! {
-        /// ENS Registry contract.
-        #[sol(rpc)]
-        contract EnsRegistry {
-            /// Returns the resolver for the specified node.
-            function resolver(bytes32 node) view returns (address);
-
-            /// Returns the owner of this node.
-            function owner(bytes32 node) view returns (address);
-        }
-
         /// ENS Resolver interface (ENSIP-1).
         #[sol(rpc)]
         contract EnsResolver {
@@ -227,10 +212,6 @@ mod contract {
             /// `reverse_name` is the DNS wire-format encoding of `<addr>.addr.reverse`.
             function reverse(bytes calldata reverse_name) external view returns (string memory name, address resolver, address reverse_resolver, address addr);
         }
-
-        /// ENS Reverse Registrar contract.
-        #[sol(rpc)]
-        contract ReverseRegistrar {}
     }
 
     /// Error type for ENS resolution.
@@ -424,7 +405,7 @@ pub fn namehash(name: &str) -> B256 {
 
 /// Returns the reverse-registrar name of an address.
 pub fn reverse_address(addr: &Address) -> String {
-    format!("{addr:x}.{ENS_REVERSE_REGISTRAR_DOMAIN}")
+    format!("{addr:x}.addr.reverse")
 }
 
 #[cfg(test)]
