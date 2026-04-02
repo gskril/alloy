@@ -8,17 +8,19 @@
 
 //! ENS Name resolving utilities.
 
-use alloy_primitives::{address, Address, Keccak256, B256};
-use std::{borrow::Cow, str::FromStr};
+mod utils;
+pub use utils::{dns_encode, namehash, reverse_address, DnsEncodeError};
+
+use alloy_primitives::{address, Address};
+use std::str::FromStr;
 
 /// ENS Universal Resolver address (`0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`).
 ///
-/// The primary entry-point for ENSv2 name resolution. This upgradable proxy,
+/// The primary entry-point for ENS name resolution. This upgradable proxy,
 /// governed by the ENS DAO, supports wildcard resolvers and CCIP Read (ERC-3668)
 /// for L2 and offchain names.
 pub const ENS_UNIVERSAL_RESOLVER_ADDRESS: Address =
     address!("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe");
-
 
 /// Coin types for ENS multichain address resolution.
 ///
@@ -36,7 +38,7 @@ pub mod coin_type {
     ///
     /// # Panics
     ///
-    /// Panics if `chain_id` is `0` or `>= 0x80000000`.
+    /// Panics if `chain_id >= 0x80000000`.
     pub fn evm_chain(chain_id: u32) -> u64 {
         if chain_id == 1 {
             return ETH;
@@ -110,66 +112,10 @@ impl FromStr for NameOrAddress {
     }
 }
 
-/// Error returned by [`dns_encode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DnsEncodeError {
-    /// A label in the name is empty (e.g., consecutive dots or leading/trailing dot).
-    EmptyLabel,
-    /// A label exceeds the 63-byte maximum DNS length.
-    LabelTooLong,
-}
-
-impl std::fmt::Display for DnsEncodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyLabel => f.write_str("ENS name contains an empty label"),
-            Self::LabelTooLong => f.write_str("ENS name label exceeds 63 bytes"),
-        }
-    }
-}
-
-impl std::error::Error for DnsEncodeError {}
-
-/// DNS wire-format encodes an ENS name for use with the Universal Resolver's `resolve()`.
-///
-/// Each label is prefixed with its byte length and the sequence is terminated with `\x00`.
-/// For example, `"foo.eth"` encodes to `[3, 'f', 'o', 'o', 3, 'e', 't', 'h', 0]`.
-///
-/// Returns an error if any label is empty or exceeds 63 bytes.
-pub fn dns_encode(name: &str) -> Result<Vec<u8>, DnsEncodeError> {
-    if name.is_empty() {
-        return Ok(vec![0]);
-    }
-
-    // Strip variation selector as in namehash.
-    const VARIATION_SELECTOR: char = '\u{fe0f}';
-    let name = if name.contains(VARIATION_SELECTOR) {
-        Cow::Owned(name.replace(VARIATION_SELECTOR, ""))
-    } else {
-        Cow::Borrowed(name)
-    };
-
-    let mut out = Vec::with_capacity(name.len() + 2);
-    for label in name.split('.') {
-        let bytes = label.as_bytes();
-        if bytes.is_empty() {
-            return Err(DnsEncodeError::EmptyLabel);
-        }
-        if bytes.len() > 63 {
-            return Err(DnsEncodeError::LabelTooLong);
-        }
-        out.push(bytes.len() as u8);
-        out.extend_from_slice(bytes);
-    }
-    out.push(0);
-    Ok(out)
-}
-
 #[cfg(feature = "contract")]
 mod contract {
     use alloy_sol_types::sol;
 
-    // ENS Registry, Resolver, and Universal Resolver contracts.
     sol! {
         /// ENS Resolver interface (ENSIP-1).
         #[sol(rpc)]
@@ -197,7 +143,7 @@ mod contract {
             function addr(bytes32 node, uint256 coin_type) view returns (bytes memory);
         }
 
-        /// ENS Universal Resolver (ENSv2).
+        /// ENS Universal Resolver.
         ///
         /// The single entry-point for all ENS resolution. Handles routing to wildcard
         /// resolvers and CCIP Read (ERC-3668) for L2 and offchain names.
@@ -356,8 +302,7 @@ mod provider {
         async fn lookup_txt(&self, name: &str, key: &str) -> Result<String, EnsError> {
             let node = namehash(name);
             let dns = dns_encode(name)?;
-            let calldata =
-                EnsResolver::textCall { node, key: key.to_string() }.abi_encode();
+            let calldata = EnsResolver::textCall { node, key: key.to_string() }.abi_encode();
 
             let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
             let ret = ur
@@ -395,81 +340,10 @@ mod provider {
     }
 }
 
-/// Returns the ENS namehash as specified in [EIP-137](https://eips.ethereum.org/EIPS/eip-137)
-pub fn namehash(name: &str) -> B256 {
-    if name.is_empty() {
-        return B256::ZERO;
-    }
-
-    // Remove the variation selector `U+FE0F` if present.
-    const VARIATION_SELECTOR: char = '\u{fe0f}';
-    let name = if name.contains(VARIATION_SELECTOR) {
-        Cow::Owned(name.replace(VARIATION_SELECTOR, ""))
-    } else {
-        Cow::Borrowed(name)
-    };
-
-    // Generate the node starting from the right.
-    // This buffer is `[node @ [u8; 32], label_hash @ [u8; 32]]`.
-    let mut buffer = [0u8; 64];
-    for label in name.rsplit('.') {
-        // node = keccak256([node, keccak256(label)])
-
-        // Hash the label.
-        let mut label_hasher = Keccak256::new();
-        label_hasher.update(label.as_bytes());
-        label_hasher.finalize_into(&mut buffer[32..]);
-
-        // Hash both the node and the label hash, writing into the node.
-        let mut buffer_hasher = Keccak256::new();
-        buffer_hasher.update(buffer.as_slice());
-        buffer_hasher.finalize_into(&mut buffer[..32]);
-    }
-    buffer[..32].try_into().unwrap()
-}
-
-/// Returns the reverse-registrar name of an address.
-pub fn reverse_address(addr: &Address) -> String {
-    format!("{addr:x}.addr.reverse")
-}
-
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
-    use alloy_primitives::hex;
-
-    fn assert_hex(hash: B256, val: &str) {
-        assert_eq!(hash.0[..], hex::decode(val).unwrap()[..]);
-    }
-
-    #[test]
-    fn test_namehash() {
-        for (name, expected) in &[
-            ("", "0x0000000000000000000000000000000000000000000000000000000000000000"),
-            ("eth", "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae"),
-            ("foo.eth", "0xde9b09fd7c5f901e23a3f19fecc54828e9c848539801e86591bd9801b019f84f"),
-            ("alice.eth", "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"),
-            ("ret↩️rn.eth", "0x3de5f4c02db61b221e7de7f1c40e29b6e2f07eb48d65bf7e304715cd9ed33b24"),
-        ] {
-            assert_hex(namehash(name), expected);
-        }
-    }
-
-    #[test]
-    fn test_reverse_address() {
-        for (addr, expected) in [
-            (
-                "0x314159265dd8dbb310642f98f50c066173c1259b",
-                "314159265dd8dbb310642f98f50c066173c1259b.addr.reverse",
-            ),
-            (
-                "0x28679A1a632125fbBf7A68d850E50623194A709E",
-                "28679a1a632125fbbf7a68d850e50623194a709e.addr.reverse",
-            ),
-        ] {
-            assert_eq!(reverse_address(&addr.parse().unwrap()), expected, "{addr}");
-        }
-    }
+    use std::str::FromStr;
 
     #[test]
     fn test_invalid_address() {
@@ -484,43 +358,14 @@ mod test {
     }
 
     #[test]
-    fn test_dns_encode() {
-        assert_eq!(dns_encode("").unwrap(), vec![0]);
-        assert_eq!(
-            dns_encode("foo.eth").unwrap(),
-            vec![3, b'f', b'o', b'o', 3, b'e', b't', b'h', 0]
-        );
-        assert_eq!(
-            dns_encode("alice.eth").unwrap(),
-            vec![5, b'a', b'l', b'i', b'c', b'e', 3, b'e', b't', b'h', 0]
-        );
-        // Empty label errors
-        assert_eq!(dns_encode(".eth").unwrap_err(), DnsEncodeError::EmptyLabel);
-        assert_eq!(dns_encode("foo..eth").unwrap_err(), DnsEncodeError::EmptyLabel);
-        // Label too long
-        let long_label = "a".repeat(64) + ".eth";
-        assert_eq!(dns_encode(&long_label).unwrap_err(), DnsEncodeError::LabelTooLong);
-    }
-
-    #[test]
     fn test_name_or_address_dns_detection() {
-        // Standard ENS names
         assert!(matches!(NameOrAddress::from_str("foo.eth"), Ok(NameOrAddress::Name(_))));
-        // Imported DNS names (ENSv2 requirement)
-        assert!(matches!(
-            NameOrAddress::from_str("ensfairy.xyz"),
-            Ok(NameOrAddress::Name(_))
-        ));
-        // Valid subdomains
-        assert!(matches!(
-            NameOrAddress::from_str("sub.foo.eth"),
-            Ok(NameOrAddress::Name(_))
-        ));
+        assert!(matches!(NameOrAddress::from_str("ensfairy.xyz"), Ok(NameOrAddress::Name(_))));
+        assert!(matches!(NameOrAddress::from_str("sub.foo.eth"), Ok(NameOrAddress::Name(_))));
     }
 
     #[test]
     fn test_coin_type_evm_chain() {
-        use crate::coin_type;
         assert_eq!(coin_type::evm_chain(1), coin_type::ETH); // mainnet special case
         assert_eq!(coin_type::evm_chain(8453), 0x8000_2105); // Base
         assert_eq!(coin_type::evm_chain(10), 0x8000_000A); // Optimism
@@ -530,12 +375,12 @@ mod test {
     #[test]
     #[should_panic]
     fn test_coin_type_evm_chain_invalid() {
-        crate::coin_type::evm_chain(0x8000_0000);
+        coin_type::evm_chain(0x8000_0000);
     }
 }
 
 #[cfg(all(test, feature = "provider"))]
-mod tests {
+mod provider_tests {
     use super::*;
     use alloy_primitives::address;
     use alloy_provider::ProviderBuilder;
@@ -566,13 +411,10 @@ mod tests {
         let provider = ProviderBuilder::new()
             .connect_http("http://reth-ethereum.ithaca.xyz/rpc".parse().unwrap());
 
-        let name = "vitalik.eth";
-        let res = provider.lookup_txt(name, "avatar").await.unwrap();
+        let res = provider.lookup_txt("vitalik.eth", "avatar").await.unwrap();
         assert_eq!(res, "https://euc.li/vitalik.eth")
     }
 
-    /// ENSv2 readiness test: the Universal Resolver integration test name should resolve
-    /// to a well-known address. See https://docs.ens.domains/web/ensv2-readiness
     #[tokio::test]
     async fn test_universal_resolver_integration() {
         let provider = ProviderBuilder::new()
