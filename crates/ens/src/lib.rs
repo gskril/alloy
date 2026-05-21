@@ -239,20 +239,7 @@ mod provider {
         /// and CCIP Read (ERC-3668) for L2 and offchain names.
         ///
         /// [Universal Resolver]: https://docs.ens.domains/web/ensv2-readiness
-        async fn resolve_name(&self, name: &str) -> Result<Address, EnsError> {
-            let node = namehash(name);
-            let dns = dns_encode(name)?;
-            let calldata = EnsResolver::addrCall { node }.abi_encode();
-
-            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
-            let ret = ur
-                .resolve(dns.into(), calldata.into())
-                .call()
-                .await
-                .map_err(EnsError::Resolve)?;
-
-            Address::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
-        }
+        async fn resolve_name(&self, name: &str) -> Result<Address, EnsError>;
 
         /// Resolves an ENS name to a multichain address for the given coin type (ENSIP-11).
         ///
@@ -264,55 +251,13 @@ mod provider {
             &self,
             name: &str,
             coin_type: u64,
-        ) -> Result<Bytes, EnsError> {
-            let node = namehash(name);
-            let dns = dns_encode(name)?;
-            let calldata = EnsMulticoinResolver::addrCall {
-                node,
-                coin_type: U256::from(coin_type),
-            }
-            .abi_encode();
-
-            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
-            let ret = ur
-                .resolve(dns.into(), calldata.into())
-                .call()
-                .await
-                .map_err(EnsError::Resolve)?;
-
-            Bytes::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
-        }
+        ) -> Result<Bytes, EnsError>;
 
         /// Performs a reverse lookup of an address to its primary ENS name.
-        async fn lookup_address(&self, address: &Address) -> Result<String, EnsError> {
-            let reverse_name = reverse_address(address);
-            let dns = dns_encode(&reverse_name)?;
-
-            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
-            let ret = ur
-                .reverse(dns.into(), U256::from(coin_type::ETH))
-                .call()
-                .await
-                .map_err(EnsError::Lookup)?;
-
-            Ok(ret.name)
-        }
+        async fn lookup_address(&self, address: &Address) -> Result<String, EnsError>;
 
         /// Looks up a text record for an ENS name.
-        async fn lookup_txt(&self, name: &str, key: &str) -> Result<String, EnsError> {
-            let node = namehash(name);
-            let dns = dns_encode(name)?;
-            let calldata = EnsResolver::textCall { node, key: key.to_string() }.abi_encode();
-
-            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
-            let ret = ur
-                .resolve(dns.into(), calldata.into())
-                .call()
-                .await
-                .map_err(EnsError::ResolveTxtRecord)?;
-
-            String::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
-        }
+        async fn lookup_txt(&self, name: &str, key: &str) -> Result<String, EnsError>;
     }
 
     #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
@@ -336,6 +281,73 @@ mod provider {
                 return Err(EnsError::ResolverNotFound(name.to_string()));
             }
             Ok(EnsResolverInstance::new(ret._0, self))
+        }
+
+        async fn resolve_name(&self, name: &str) -> Result<Address, EnsError> {
+            let node = namehash(name);
+            let dns = dns_encode(name)?;
+            let calldata = EnsResolver::addrCall { node }.abi_encode();
+
+            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
+            let ret = ur
+                .resolve(dns.into(), calldata.into())
+                .call()
+                .await
+                .map_err(EnsError::Resolve)?;
+
+            Address::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
+        }
+
+        async fn resolve_name_for_coin_type(
+            &self,
+            name: &str,
+            coin_type: u64,
+        ) -> Result<Bytes, EnsError> {
+            let node = namehash(name);
+            let dns = dns_encode(name)?;
+            let calldata = EnsMulticoinResolver::addrCall {
+                node,
+                coin_type: U256::from(coin_type),
+            }
+            .abi_encode();
+
+            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
+            let ret = ur
+                .resolve(dns.into(), calldata.into())
+                .call()
+                .await
+                .map_err(EnsError::Resolve)?;
+
+            Bytes::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
+        }
+
+        async fn lookup_address(&self, address: &Address) -> Result<String, EnsError> {
+            let reverse_name = reverse_address(address);
+            let dns = dns_encode(&reverse_name)?;
+
+            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
+            let ret = ur
+                .reverse(dns.into(), U256::from(coin_type::ETH))
+                .call()
+                .await
+                .map_err(EnsError::Lookup)?;
+
+            Ok(ret.name)
+        }
+
+        async fn lookup_txt(&self, name: &str, key: &str) -> Result<String, EnsError> {
+            let node = namehash(name);
+            let dns = dns_encode(name)?;
+            let calldata = EnsResolver::textCall { node, key: key.to_string() }.abi_encode();
+
+            let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
+            let ret = ur
+                .resolve(dns.into(), calldata.into())
+                .call()
+                .await
+                .map_err(EnsError::ResolveTxtRecord)?;
+
+            String::abi_decode(ret.result.as_ref()).map_err(|_| EnsError::InvalidResponse)
         }
     }
 }
