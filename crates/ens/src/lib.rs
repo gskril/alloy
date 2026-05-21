@@ -143,10 +143,12 @@ mod contract {
             function addr(bytes32 node, uint256 coin_type) view returns (bytes memory);
         }
 
-        /// ENS Universal Resolver.
+        /// ENS Universal Resolver (ENSIP-23).
         ///
         /// The single entry-point for all ENS resolution. Handles routing to wildcard
         /// resolvers and CCIP Read (ERC-3668) for L2 and offchain names.
+        ///
+        /// Spec: <https://docs.ens.domains/ensip/23>
         ///
         /// Note: CCIP Read requires client-side handling of the `OffchainLookup` revert
         /// (ERC-3668). Alloy does not currently implement this; calls to names that require
@@ -158,6 +160,17 @@ mod contract {
             error ReverseAddressMismatch(string primary, bytes primaryAddress);
             error UnsupportedResolverProfile(bytes4 selector);
             error ResolverError(bytes errorData);
+
+            struct ResolverInfo {
+                bytes name;
+                uint256 offset;
+                bytes32 node;
+                address resolver;
+                bool extended;
+            }
+
+            /// Like `findResolver`, but reverts with `ResolverNotFound` if no resolver exists.
+            function requireResolver(bytes memory name) public view returns (ResolverInfo memory info);
 
             /// Returns the resolver for `name` (DNS wire-format) without performing resolution.
             ///
@@ -271,16 +284,13 @@ mod provider {
             let dns = dns_encode(name)?;
 
             let ur = UniversalResolver::new(ENS_UNIVERSAL_RESOLVER_ADDRESS, self);
-            let ret = ur
-                .findResolver(dns.into())
+            let info = ur
+                .requireResolver(dns.into())
                 .call()
                 .await
                 .map_err(EnsError::Resolver)?;
 
-            if ret._0 == Address::ZERO {
-                return Err(EnsError::ResolverNotFound(name.to_string()));
-            }
-            Ok(EnsResolverInstance::new(ret._0, self))
+            Ok(EnsResolverInstance::new(info.resolver, self))
         }
 
         async fn resolve_name(&self, name: &str) -> Result<Address, EnsError> {
